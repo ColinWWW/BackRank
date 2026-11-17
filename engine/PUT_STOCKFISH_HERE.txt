@@ -1,0 +1,5 @@
+Download Stockfish from https://stockfishchess.org/download/ and put the
+executable (or the whole unzipped folder) in this directory.
+
+Windows: pick the AVX2 build unless your CPU is older than ~2013.
+Linux:   `sudo apt install stockfish` also works; no file needed here then.

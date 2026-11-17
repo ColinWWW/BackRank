@@ -1,0 +1,8 @@
+[Event "Backrank local game"]
+[Site "localhost"]
+[Date "2026.11.10"]
+[White "You"]
+[Black "API bot"]
+[Result "0-1"]
+
+1. e4 0-1

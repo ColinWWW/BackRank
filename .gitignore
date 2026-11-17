@@ -1,0 +1,3 @@
+# holds your Lichess access token
+data/lichess.json
+__pycache__/
