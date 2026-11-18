@@ -19,6 +19,27 @@ Linux/macOS: `./run.sh`, or `pip install pywebview && python app.py` for a windo
 
 ## What's in it
 
+- **Look** - two looks, switched at the bottom of the sidebar (remembered in
+  `data/settings.json`). **Grid** (the default) is a neon board under glass:
+  you always play in cyan and the opponent in orange (pieces, trails, eval bar),
+  gold means a reward and pink an alarm. The last three moves leave light trails
+  along the piece's real path (a straight line, or the knight's L). Captured
+  pieces break apart, and each move grade gets its moment in a review: a gold
+  sweep for Brilliant, a glitch for a Blunder, a ghost of the missed move for a
+  Miss, and so on, each with its own synth blip. A coach comments on every move
+  in one dry voice. Optional scanlines. **Classic** is the earlier calm look
+  with none of the effects. The Grid fonts (Audiowide, Chakra Petch, IBM Plex
+  Mono; Latin only, SIL Open Font License) are bundled in `static/fonts`, so it
+  looks the same offline.
+- **Progress** - XP for real improvement only: puzzles (30 first try, 10
+  otherwise), reviewed games (10), games with no blunders (15), beating your
+  30-day average accuracy (25), Great (10) and Brilliant (50) moves, first wins
+  against each ladder opponent, and the weekly bounty (150). Ranks run Pawn I to
+  King III and are worked out from your existing history, so you start at the
+  rank you have already earned. The Profile shows your rank, a daily puzzle
+  streak, a no-blunder streak, the weekly bounty (your biggest weakness: solve 5
+  of its puzzles and play 3 reviewed games without it), a weakness tracker, a
+  "ghost of last month" comparison and achievements.
 - **Profile** is the first screen. See below.
 - **Review** - import recent games by Chess.com or Lichess username, or paste a
   PGN. Every move is graded (Brilliant to Blunder), with accuracy, average
@@ -40,8 +61,13 @@ Linux/macOS: `./run.sh`, or `pip install pywebview && python app.py` for a windo
   ones you got wrong, and kinds of mistake you make most often come up most.
   Pick a single kind from the list, or use **Practice these** on a row of the
   Profile's mistakes card. Progress is kept in `data/puzzles.json`.
-- **Play** - against Stockfish at a chosen strength, or against a friend on the
-  same screen.
+  **Hint** lights up the piece to move; a second click draws the move.
+- **Sounds** - a wooden knock when a piece moves and a heavier double knock on
+  a capture, on every board. They are synthesized in the page (no audio
+  files); switch them off with **Sound: on** at the bottom of the sidebar.
+- **Play** - against a ladder of named opponents (Patzer 600 up to The Engine
+  at full strength; the styles are flavour, underneath each is Stockfish at
+  that rating), a custom strength, or a friend on the same screen.
 - **Play on Lichess** - choose Lichess as the opponent on the Play tab to play
   your own Lichess games on this board: find an opponent (rapid or slower; a
   Lichess rule for other apps), play the Lichess computer, or challenge a
@@ -86,4 +112,5 @@ saved as PGN in `data/games`.
     build.bat          builds Backrank.exe
     server.py          the whole backend (python-chess + Stockfish over UCI)
     static/index.html  the whole frontend (no build step, no CDN)
+    static/fonts/      the Grid fonts and their licences
     openings.json      opening names (from lichess-org/chess-openings, CC0)

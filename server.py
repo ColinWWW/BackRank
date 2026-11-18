@@ -1456,6 +1456,8 @@ def puzzle_try(pid, move):
             if solved:
                 entry.update(solved=True, first=entry["tries"] == 1 and not entry.get("revealed"), ts=int(time.time()))
             save_json(DATA / "puzzles.json", PUZZLE_LOG)
+    if solved:
+        note_puzzle_day()
     out = {"verdict": verdict, "loss": loss, "san": board.san(mv), "log": entry, "summary": puzzle_summary()}
     if solved:
         board.push(mv)
@@ -1473,6 +1475,308 @@ def puzzle_reveal(pid):
     board = chess.Board(pz["fen"])
     board.push_uci(pz["best_uci"])
     return {"solution": puzzle_solution(pz), "fen": board.fen(), "log": entry}
+
+
+# --------------------------------------------------------------------------
+# Settings (look and sound), kept on disk so the desktop window remembers them
+# --------------------------------------------------------------------------
+
+SETTINGS = load_json(DATA / "settings.json", {})
+SETTING_CHOICES = {"look": ("grid", "classic"), "scan": ("on", "off"), "sound": ("on", "off")}
+
+
+def setting(key):
+    value = SETTINGS.get(key)
+    return value if value in SETTING_CHOICES[key] else SETTING_CHOICES[key][0]
+
+
+def page_html():
+    """The page, with the saved look applied before it first paints."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    attrs = " ".join(f'data-{"theme" if k == "look" else k}="{setting(k)}"' for k in SETTING_CHOICES)
+    return html.replace('<html lang="en">', f'<html lang="en" {attrs}>', 1)
+
+
+def update_settings(d):
+    with LIB_LOCK:
+        for k, v in d.items():
+            if k in SETTING_CHOICES and v in SETTING_CHOICES[k]:
+                SETTINGS[k] = v
+            elif k == "rank_seen":
+                SETTINGS[k] = max(0, min(MAX_LEVEL, int(v)))
+        save_json(DATA / "settings.json", SETTINGS)
+    return SETTINGS
+
+
+# --------------------------------------------------------------------------
+# Progression: XP, ranks, streaks, weaknesses, achievements, ladder, bounty.
+# Everything is worked out from data that is already stored (reviews, puzzle
+# attempts, game results), so existing history counts from the first run.
+# --------------------------------------------------------------------------
+
+ACTIVITY = load_json(DATA / "activity.json", {})
+RANK_NAMES = ("Pawn", "Knight", "Bishop", "Rook", "Queen", "King")
+TIERS = ("I", "II", "III")
+MAX_LEVEL = len(RANK_NAMES) * len(TIERS) - 1
+DAY = 86400
+LADDER = (
+    {"id": "patzer", "name": "Patzer", "elo": 600, "xp": 50},
+    {"id": "coffeehouse", "name": "Coffeehouse", "elo": 1000, "xp": 100},
+    {"id": "wall", "name": "The Wall", "elo": 1400, "xp": 150},
+    {"id": "tactician", "name": "Tactician", "elo": 1800, "xp": 200},
+    {"id": "grinder", "name": "Grinder", "elo": 2400, "xp": 300},
+    {"id": "engine", "name": "The Engine", "elo": 3200, "xp": 500},
+)
+BADGES = (
+    {"id": "brilliant", "name": "Double exclam", "desc": "Play your first Brilliant move.", "icon": "!!", "tone": "gold"},
+    {"id": "clean5", "name": "Clean sheet", "desc": "Five games in a row with no blunders.", "icon": "0", "tone": ""},
+    {"id": "scramble", "name": "Time scramble", "desc": "Win with under 30 seconds on your clock.", "icon": "\u23f1", "tone": "foe"},
+    {"id": "swindle", "name": "Swindle", "desc": "Win a game after the eval had you at -3 or worse.", "icon": "\u21ba", "tone": ""},
+    {"id": "drill", "name": "Drill sergeant", "desc": "Solve 10 puzzles of one kind in a single day.", "icon": "\u265c\ufe0e", "tone": ""},
+    {"id": "slayer", "name": "Giant slayer", "desc": "Beat the Grinder (2400) on the Play tab.", "icon": "\u2694\ufe0e", "tone": "gold",
+     "hint": "Beat the Tactician on the Play tab to reveal this one."},
+)
+WIN_DETAILS = {}
+
+
+def level_cost(level):
+    return 200 + 100 * level
+
+
+def rank_name(level):
+    return f"{RANK_NAMES[level // 3]} {TIERS[level % 3]}"
+
+
+def opponent_of(g):
+    return g["black"] if g["my_color"] == "white" else g["white"]
+
+
+def ladder_rung(name):
+    """Which ladder opponent a local game was against, from the name it was saved under."""
+    name = str(name or "").strip()
+    low = name.lower()
+    for rung in LADDER:
+        if low.startswith(rung["name"].lower()):
+            return rung
+    if low.startswith("stockfish"):              # games from before the ladder existed
+        m = re.search(r"\((\d{3,4})\)", name)
+        if not m:
+            return LADDER[-1]
+        fit = [r for r in LADDER if r["elo"] <= int(m.group(1))]
+        return fit[-1] if fit else None
+    return None
+
+
+def win_details(g):
+    """Lowest point (my win%) and my last clock reading in a won, reviewed game."""
+    key = (g["id"], g["review"]["depth"])
+    hit = WIN_DETAILS.get(key)
+    if hit is None:
+        review = load_json(DATA / "reviews" / f"{g['id']}.json", None) or {"moves": []}
+        my, low, clock = g["my_color"], 100.0, None
+        for m in review["moves"]:
+            w = m["eval_after"]["win"]
+            low = min(low, w if my == "white" else 100 - w)
+            if m["color"] == my and m.get("clock") is not None:
+                clock = m["clock"]
+        hit = WIN_DETAILS[key] = {"low": low, "clock": clock}
+    return hit
+
+
+def note_puzzle_day():
+    today = datetime.date.today().isoformat()
+    with LIB_LOCK:
+        days = ACTIVITY.setdefault("puzzle_days", [])
+        if today not in days:
+            days.append(today)
+            save_json(DATA / "activity.json", ACTIVITY)
+
+
+def day_streak(days, today):
+    """Days in a row with a solved puzzle. Today does not break it until it is over."""
+    d = today if today in days else today - datetime.timedelta(days=1)
+    n = 0
+    while d in days:
+        n += 1
+        d -= datetime.timedelta(days=1)
+    return n
+
+
+def weaknesses(reviewed, summary):
+    """Each kind of mistake as a weakness: how often, whether it is fading, puzzles done."""
+    recent = reviewed[-10:] if len(reviewed) >= 15 else []
+    before = reviewed[:-10] if recent else reviewed
+    moves = lambda gs: sum(sum(g["review"].get("phase_moves", {}).values()) for g in gs)
+    hits = lambda gs, tag: sum(1 for g in gs for e in g["review"].get("errors", []) if tag in e.get("tags", []))
+    rate = lambda h, m: round(100 * h / m, 1) if m else None
+    counts = {}
+    for g in reviewed:
+        for e in g["review"].get("errors", []):
+            for t in e.get("tags", []):
+                if t not in CONTEXT_TAGS:
+                    counts[t] = counts.get(t, 0) + 1
+    kinds = {k["tag"]: k for k in summary["kinds"]}
+    all_moves, recent_moves, before_moves = moves(reviewed), moves(recent), moves(before)
+    out = []
+    for tag, n in sorted(counts.items(), key=lambda kv: -kv[1])[:8]:
+        old = rate(hits(before, tag), before_moves)
+        new = rate(hits(recent, tag), recent_moves) if recent else None
+        improve = max(0.0, min(1.0, 1 - new / old)) if new is not None and old else 0.0
+        k = kinds.get(tag) or {"count": 0, "solved": 0}
+        solved = k["solved"] / k["count"] if k["count"] else 0.0
+        fixed = solved >= 0.8 and improve >= 0.5        # puzzles alone cannot clear it
+        out.append({"tag": tag, "label": TAG_SHORT.get(tag, tag), "count": n, "per100": rate(n, all_moves),
+                    "before": old, "recent": new, "solved": k["solved"], "puzzles": k["count"],
+                    "health": 0.0 if fixed else round(max(0.05, 1 - 0.5 * solved - 0.5 * improve), 2),
+                    "fixed": fixed})
+    return out
+
+
+def weekly_bounty(reviewed, pool, weak, today):
+    """This week's target: the biggest weakness, picked on Monday and fixed for the week."""
+    monday = today - datetime.timedelta(days=today.weekday())
+    week = monday.isoformat()
+    with LIB_LOCK:
+        b = ACTIVITY.get("bounty")
+        if not b or b.get("week") != week:
+            if not weak:
+                return None
+            b = ACTIVITY["bounty"] = {"week": week, "tag": weak[0]["tag"]}
+            save_json(DATA / "activity.json", ACTIVITY)
+        start = datetime.datetime.combine(monday, datetime.time()).timestamp()
+        tag = b["tag"]
+        solved = sum(1 for pid, e in list(PUZZLE_LOG.items())
+                     if e.get("solved") and (e.get("ts") or 0) >= start and tag in (pool.get(pid) or {}).get("kinds", []))
+        clean = sum(1 for g in reviewed if g["ts"] >= start
+                    and not any(tag in e.get("tags", []) for e in g["review"].get("errors", [])))
+        done_weeks = ACTIVITY.setdefault("bounties_done", [])
+        done = any(d.get("week") == week for d in done_weeks)
+        if not done and solved >= 5 and clean >= 3:
+            done_weeks.append({"week": week, "ts": time.time()})
+            save_json(DATA / "activity.json", ACTIVITY)
+            done = True
+    return {"week": week, "tag": tag, "label": TAG_SHORT.get(tag, tag), "xp": 150, "done": done,
+            "puzzles": min(solved, 5), "puzzles_goal": 5, "games": min(clean, 3), "games_goal": 3,
+            "ends": (monday + datetime.timedelta(days=6)).isoformat()}
+
+
+def ghost_of(reviewed, now):
+    """Me over the last 30 days against me over the 30 days before that."""
+    def pack(gs):
+        if not gs:
+            return None
+        accs, trail, total = [g["review"]["accuracy"] for g in gs], [], 0.0
+        for i, a in enumerate(accs, 1):
+            total += a
+            trail.append(round(total / i, 1))
+        return {"games": len(gs), "accuracy": round(sum(accs) / len(accs), 1),
+                "acpl": round(sum(g["review"].get("acpl") or 0 for g in gs) / len(gs), 1),
+                "blunders": round(sum(g["review"].get("counts", {}).get("blunder", 0) for g in gs) / len(gs), 2),
+                "trail": trail}
+    recent = [g for g in reviewed if g["ts"] >= now - 30 * DAY]
+    month = [g for g in reviewed if now - 60 * DAY <= g["ts"] < now - 30 * DAY]
+    if month:
+        label = "the 30 days before that"
+    else:   # nothing analyzed a month ago: race the games just before this window instead
+        month = [g for g in reviewed if g["ts"] < now - 30 * DAY][-max(5, len(recent)):]
+        label = f"your {len(month)} games before that"
+    return {"now": pack(recent), "then": pack(month), "then_label": label}
+
+
+def progress_state():
+    today, now = datetime.date.today(), time.time()
+    with LIB_LOCK:
+        mine = sorted((g for g in LIB.values() if g.get("my_color") and my_outcome(g)), key=lambda g: g["ts"])
+    reviewed = [g for g in mine if g.get("review") and g["review"].get("accuracy") is not None]
+    pool, summary = puzzle_pool(), puzzle_summary()
+    events = []
+
+    def earn(ts, xp, kind, label):
+        events.append({"ts": ts or 0, "xp": xp, "kind": kind, "label": label})
+
+    for i, g in enumerate(reviewed):
+        r, vs = g["review"], opponent_of(g)
+        counts = r.get("counts", {})
+        earn(g["ts"], 10, "review", f"Reviewed your game against {vs}")
+        if counts.get("brilliant"):
+            earn(g["ts"], 50 * counts["brilliant"], "brilliant", f"Brilliant move against {vs}")
+        if counts.get("great"):
+            earn(g["ts"], 10 * counts["great"], "great", f"Great move against {vs}")
+        if not counts.get("blunder"):
+            earn(g["ts"], 15, "clean", f"No blunders against {vs}")
+        prior = [h["review"]["accuracy"] for h in reviewed[:i] if g["ts"] - 30 * DAY <= h["ts"] < g["ts"]]
+        if len(prior) >= 3 and r["accuracy"] > sum(prior) / len(prior):
+            earn(g["ts"], 25, "accuracy", f"Beat your 30-day average accuracy against {vs}")
+
+    solved_days, per_day_kind = set(), {}
+    for pid, e in list(PUZZLE_LOG.items()):
+        if not e.get("solved"):
+            continue
+        earn(e.get("ts"), 30 if e.get("first") else 10, "puzzle",
+             "Solved a puzzle on the first try" if e.get("first") else "Solved a puzzle")
+        if e.get("ts"):
+            day = datetime.date.fromtimestamp(e["ts"])
+            solved_days.add(day)
+            for t in (pool.get(pid) or {}).get("kinds", []):
+                per_day_kind[(day, t)] = per_day_kind.get((day, t), 0) + 1
+    for d in ACTIVITY.get("puzzle_days", []):
+        try:
+            solved_days.add(datetime.date.fromisoformat(d))
+        except ValueError:
+            pass
+
+    beaten = {}
+    for g in mine:
+        if g.get("source") == "local" and my_outcome(g) == "win":
+            rung = ladder_rung(opponent_of(g))
+            if rung and rung["id"] not in beaten:
+                beaten[rung["id"]] = g["ts"]
+                earn(g["ts"], rung["xp"], "ladder", f"First win against {rung['name']}")
+
+    weak = weaknesses(reviewed, summary)
+    bounty = weekly_bounty(reviewed, pool, weak, today)
+    for d in ACTIVITY.get("bounties_done", []):
+        earn(d.get("ts"), 150, "bounty", "Completed a weekly bounty")
+
+    xp = sum(e["xp"] for e in events)
+    level, floor = 0, 0
+    while level < MAX_LEVEL and xp >= floor + level_cost(level):
+        floor += level_cost(level)
+        level += 1
+
+    run = best = 0
+    for g in reviewed:
+        run = 0 if g["review"].get("counts", {}).get("blunder") else run + 1
+        best = max(best, run)
+    details = [win_details(g) for g in reviewed if my_outcome(g) == "win"]
+    unlocked = {
+        "brilliant": any(g["review"].get("counts", {}).get("brilliant") for g in reviewed),
+        "clean5": best >= 5,
+        "scramble": any(d["clock"] is not None and d["clock"] < 30 for d in details),
+        "swindle": any(d["low"] <= 25 for d in details),          # about -3.00 from my side
+        "drill": any(n >= 10 for n in per_day_kind.values()),
+        "slayer": "grinder" in beaten or "engine" in beaten,
+    }
+    badges = [dict(b, unlocked=unlocked[b["id"]],
+                   hidden=b["id"] == "slayer" and not unlocked["slayer"] and "tactician" not in beaten)
+              for b in BADGES]
+    sources = {}
+    for e in events:
+        slot = sources.setdefault(e["kind"], {"xp": 0, "count": 0})
+        slot["xp"] += e["xp"]
+        slot["count"] += 1
+    return {
+        "xp": xp, "level": level, "rank": rank_name(level), "piece": RANK_NAMES[level // 3].lower(),
+        "next": rank_name(level + 1) if level < MAX_LEVEL else None,
+        "into": xp - floor, "need": level_cost(level) if level < MAX_LEVEL else 0,
+        "sources": sources, "recent": sorted(events, key=lambda e: -e["ts"])[:6],
+        "streaks": {"puzzle": day_streak(solved_days, today), "puzzle_today": today in solved_days,
+                    "clean": run, "clean_best": best},
+        "weaknesses": weak, "bounty": bounty, "badges": badges,
+        "ladder": [dict(r, beaten=r["id"] in beaten) for r in LADDER],
+        "ghost": ghost_of(reviewed, now), "puzzles_solved": summary["solved"],
+        "rank_seen": SETTINGS.get("rank_seen"),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1953,7 +2257,17 @@ class Handler(BaseHTTPRequestHandler):
     # -- routes -----------------------------------------------------------
     def route(self, method, path, q):
         if method == "GET" and path in ("/", "/index.html"):
-            return self.send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+            return self.send(200, page_html(), "text/html; charset=utf-8")
+        m = re.fullmatch(r"/fonts/([a-z0-9-]+\.woff2)", path)
+        if m and method == "GET":   # bundled fonts, so the desktop app looks right offline
+            font = STATIC / "fonts" / m.group(1)
+            if not font.is_file():
+                raise ApiError(404, "Not found.")
+            return self.send(200, font.read_bytes(), "font/woff2")
+        if path == "/api/settings":
+            return self.send(200, update_settings(self.body()) if method == "POST" else SETTINGS)
+        if path == "/api/progress":
+            return self.send(200, progress_state())
 
         if path == "/api/status":
             return self.send(200, {"engine": engine_name(), "engine_path": ENGINE_PATH,
